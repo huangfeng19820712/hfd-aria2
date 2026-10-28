@@ -16,7 +16,8 @@ else
     SCRIPT_DIR="$(cd "$(dirname "$(pwd)/${BASH_SOURCE[0]}")" && pwd)"
 fi
 
-[[ -f "$SCRIPT_DIR/hfd-aria2.env" ]] && source "$SCRIPT_DIR/hfd-aria2.env"
+[[ -f "$SCRIPT_DIR/hfd-aria2-lib.sh" ]] && source "$SCRIPT_DIR/hfd-aria2-lib.sh"
+[[ -f "$SCRIPT_DIR/hfd-aria2.env" ]] && load_env_file "$SCRIPT_DIR/hfd-aria2.env"
 
 if [[ ! -f "$FILES_LIST" ]]; then
     echo "[ERROR] aria2 input file not found: $FILES_LIST" >&2
@@ -120,17 +121,6 @@ if [[ -n "$GLOBAL_OPTS" && "$GLOBAL_OPTS" != "{}" ]]; then
     fi
 fi
 
-if [[ -n "$HF_TOKEN" ]]; then
-    HEADER_OPTS="$(jq -cn --arg t "$HF_TOKEN" '{header: ["Authorization: Bearer " + $t]}')"
-    RESULT="$(aria2_rpc "aria2.changeGlobalOption" "[$HEADER_OPTS]")"
-    if echo "$RESULT" | jq -e '.error' >/dev/null 2>&1; then
-        echo "[WARN] changeGlobalOption (header) failed:"
-        echo "$RESULT" | jq .
-    else
-        echo "[INFO] Authorization header set globally"
-    fi
-fi
-
 ###############################################################################
 # 读取 hfd 生成的 aria2 输入文件
 #
@@ -152,12 +142,47 @@ GIDS=()
 
 dbg() { [[ "${HFD_DEBUG:-0}" == "1" ]] && echo "[DEBUG] $*" >&2; }
 
+# 分段参数：SPLIT 控制每文件分几段，MAXCONN 控制每服务器连接数。
+# MAXCONN 必须 >= SPLIT，否则 aria2 会用单连接顺序请求同一 URL 的多个 Range，
+# 对带签名参数的重定向目标（如 HF 的 Xet CDN）会导致后续分段失效。
+SPLIT="${ARIA2_SPLIT:-${THREADS:-4}}"
+MAXCONN="${ARIA2_MAX_CONN:-$SPLIT}"
+if (( MAXCONN < SPLIT )); then
+    MAXCONN=$SPLIT
+fi
+
 if [[ "${HFD_DEBUG:-0}" == "1" ]]; then
     echo "[DEBUG] FILES_LIST=$FILES_LIST" >&2
     echo "[DEBUG] cwd=$(pwd)" >&2
     echo "[DEBUG] first 5 lines of file:" >&2
     head -5 "$FILES_LIST" >&2
 fi
+
+###############################################################################
+# 移除与目标文件冲突的残留任务。
+# aria2 对同一 dir+out 只允许一个任务在跑；旧任务残留会让新任务直接 abort
+# (ERROR 16 Download aborted)，所以添加前先清掉同路径的 active/waiting 任务。
+###############################################################################
+
+remove_conflicting_tasks() {
+    local TARGET_DIR="$1"
+    local TARGET_OUT="$2"
+    local TARGET_PATH="${TARGET_DIR%/}/${TARGET_OUT}"
+
+    local LIST
+    LIST="$(aria2_rpc "aria2.tellActive" '[]')"
+    LIST="$LIST $(aria2_rpc "aria2.tellWaiting" '[]')"
+
+    local OLD_GID
+    for OLD_GID in $(echo "$LIST" | jq -r --arg target "$TARGET_PATH" '
+        (.result // [])[]?
+        | select(any(.files[]?; .path == $target))
+        | .gid' 2>/dev/null); do
+        [[ -z "$OLD_GID" ]] && continue
+        echo "[INFO] Removing conflicting task: $OLD_GID ($TARGET_PATH)"
+        aria2_rpc "aria2.remove" "$(jq -cn --arg g "$OLD_GID" '[$g]')" >/dev/null
+    done
+}
 
 submit_task() {
 
@@ -177,6 +202,8 @@ submit_task() {
         jq -cn \
             --arg dir "$DIR" \
             --arg out "$OUT" \
+            --argjson split "$SPLIT" \
+            --argjson maxconn "$MAXCONN" \
             --argjson headers "$HEADERS_JSON" \
             '{
                 dir: $dir,
@@ -185,9 +212,10 @@ submit_task() {
                 "auto-file-renaming": "false",
                 "allow-overwrite": "true",
                 "file-allocation": "none",
-                "max-connection-per-server": "8",
-                split: "8",
+                "max-connection-per-server": $maxconn,
+                split: $split,
                 "min-split-size": "1M",
+                "max-redirect": "10",
                 header: $headers
             }'
     )"
@@ -203,6 +231,8 @@ submit_task() {
             --argjson options "$OPTIONS" \
             '[[ $url ], $options]'
     )"
+
+    remove_conflicting_tasks "$DIR" "$OUT"
 
     RESULT="$(aria2_rpc "aria2.addUri" "$PARAMS")"
 

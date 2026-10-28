@@ -35,49 +35,76 @@ AriaNg（Web 监控，http://<nas-ip>:6880）
 
 ## 安装
 
-把两个脚本放在同一目录（NAS 上假设是 `/volume2/M/ai/models/`）：
+把整个项目放在同一目录（NAS 上假设是 `/volume2/M/ai/models/`）：
 
 ```
 /volume2/M/ai/models/
-├── hfd-aria2.sh        # 主入口
-├── hfd-aria2-rpc.sh    # RPC 桥接
-└── hfd-aria2.env       # 你的配置（可选）
+├── hfd-aria2.sh          # 主入口
+├── hfd-aria2-rpc.sh      # RPC 桥接
+├── hfd-aria2-lib.sh      # 公共函数（env 加载）
+├── hfd-aria2.env         # 应用层配置（从 .env.example 复制）
+├── hfd-aria2.env.example
+└── hfd-web/
+    ├── docker-compose.yml
+    ├── Dockerfile
+    ├── main.py
+    ├── index.html
+    ├── requirements.txt
+    └── .env.example      # 部署层配置（可选）
 ```
+
+路径全部是相对的，项目整体可以搬到任何位置。
 
 如果从 Windows 编辑过文件，先去掉 CRLF 行尾：
 
 ```bash
-sed -i 's/\r$//' /volume2/M/ai/models/hfd-aria2.sh
-sed -i 's/\r$//' /volume2/M/ai/models/hfd-aria2-rpc.sh
+cd /volume2/M/ai/models
+sed -i 's/\r$//' hfd-aria2.sh hfd-aria2-rpc.sh hfd-aria2-lib.sh hfd-aria2.env
 ```
 
 ---
 
 ## 配置
 
-### 方式一：环境变量文件（推荐）
+### 单一配置文件（推荐）
 
-在脚本同目录下创建 `hfd-aria2.env`：
+**只有一份配置** `hfd-aria2.env`，命令行脚本和 hfd-web 容器**共用**它：
 
 ```bash
-cat > /volume2/M/ai/models/hfd-aria2.env << 'EOF'
-export HF_ENDPOINT=https://hf-mirror.com
-export HF_TOKEN=hf_你的token
-export ARIA2_RPC=http://127.0.0.1:6800/jsonrpc
-export ARIA2_SECRET=<你的aria2-rpc-secret>
-EOF
+cp /volume2/M/ai/models/hfd-aria2.env.example /volume2/M/ai/models/hfd-aria2.env
+nano /volume2/M/ai/models/hfd-aria2.env
 
-chmod 600 /volume2/M/ai/models/hfd-aria2.env  # 含 token，建议收紧权限
+chmod 600 /volume2/M/ai/models/hfd-aria2.env  # 含 token
 ```
 
-脚本启动时会自动 `source` 这个文件，无需手动 export。
+内容：
 
-### 方式二：每次手动设置
+```bash
+HF_ENDPOINT=https://hf-mirror.com
+ARIA2_RPC=http://192.168.1.252:6800/jsonrpc
+ARIA2_SECRET=<你的aria2-rpc-secret>
+ARIA2_DIR_PREFIX=/downloads/models
+ARIA2_WEB_URL=http://192.168.1.252:6880
+```
+
+`HF_TOKEN` **公共模型不需要**，留空即可；私有/gated 模型才填（且必须填真实值，不要留占位符）。
+
+**优先级**：`命令行 export` > `容器 environment` > `hfd-aria2.env`
+
+所以临时改一下不用动文件：
+```bash
+HF_ENDPOINT=https://huggingface.co bash hfd-aria2.sh ...   # 这次走官方源
+```
+
+> ⚠️ `ARIA2_RPC` 请用 **NAS 的局域网 IP**，不要用 `127.0.0.1`。
+> 容器里的 `127.0.0.1` 指向容器自己，不是 aria2；局域网 IP 本机和容器都能通。
+
+### 手动设置（不用文件）
 
 ```bash
 export HF_ENDPOINT=https://hf-mirror.com
 export HF_TOKEN=hf_xxx
-export ARIA2_RPC=http://127.0.0.1:6800/jsonrpc
+export ARIA2_RPC=http://192.168.1.252:6800/jsonrpc
 export ARIA2_SECRET=<你的aria2-rpc-secret>
 
 bash hfd-aria2.sh <REPO_ID> ...
@@ -88,8 +115,8 @@ bash hfd-aria2.sh <REPO_ID> ...
 | 变量 | 必填 | 说明 |
 |---|---|---|
 | `HF_ENDPOINT` | 否 | HF API 根地址。默认 `https://huggingface.co`；国内推荐 `https://hf-mirror.com`（需 token） |
-| `HF_TOKEN` | 视情况 | HF 访问 token。私有/gated 模型必填；hf-mirror.com API 强制要；纯匿名下载可省 |
-| `ARIA2_RPC` | 否 | aria2 JSON-RPC 地址。默认 `http://127.0.0.1:6800/jsonrpc` |
+| `HF_TOKEN` | 否 | HF 访问 token。**公共模型不需要**（留空即可）；私有/gated 模型必填。⚠️ 不要填占位符（`hf_xxx`），会被当成真 token 发出去导致 401 |
+| `ARIA2_RPC` | 否 | aria2 JSON-RPC 地址。**容器场景必须用 NAS 局域网 IP**（`http://192.168.x.x:6800/jsonrpc`），`127.0.0.1` 在容器里指向容器自己 |
 | `ARIA2_SECRET` | **必填** | aria2 RPC token，必须与 aria2.conf 里 `rpc-secret=` 一致 |
 | `ARIA2_DIR_PREFIX` | 否 | 下载根目录前缀（容器内路径）。默认 `/downloads/models` |
 | `HFD_DEBUG` | 否 | `1` 开启 DEBUG 输出（看每个文件被怎么处理） |
@@ -184,30 +211,102 @@ bash hfd-aria2.sh Comfy-Org/MiniMax-H3 \
 
 ---
 
+## Web 服务（hfd-web）
+
+浏览器里粘贴 HF 页面 URL → 自动解析成下载任务 → 跳转到 AriaNg 看进度。
+
+```
+<项目根>/hfd-web/
+├── docker-compose.yml
+├── Dockerfile
+├── main.py            # FastAPI 后端
+├── index.html         # 单页前端
+├── requirements.txt
+└── .env.example       # 部署层配置（可选）
+```
+
+### 部署
+
+```bash
+cd <项目根>/hfd-web
+docker compose build --no-cache
+docker compose up -d
+docker compose logs -f hfd-web
+```
+
+访问 `http://<NAS-IP>:8080`。
+
+### 用法
+
+1. 粘贴 HF 页面 URL（每行一个，支持 `blob` 和 `resolve` 两种形式）
+2. 前端实时显示解析结果（按仓库分组、文件数）
+3. 提交 → 后端调 `hfd-aria2.sh` → 跳 AriaNg
+
+```bash
+# 例：粘贴这些
+https://huggingface.co/Comfy-Org/ltx-2/blob/main/split_files/loras/xxx.safetensors
+https://huggingface.co/Lightricks/LTX-2.3/blob/main/ltx-2.3-spatial-upscaler-x2-1.1.safetensors
+```
+
+会拆成 2 个仓库、分别调用 `hfd-aria2.sh`，每个仓库落到 `{ARIA2_DIR_PREFIX}/org__repo/`。
+
+### 配置（两层，各管各的）
+
+| 层 | 文件 | 内容 | 说明 |
+|---|---|---|---|
+| 应用层 | `<项目根>/hfd-aria2.env` | HF_TOKEN、ARIA2_SECRET、ARIA2_RPC… | 脚本和容器**共用**这一份 |
+| 部署层 | `<项目根>/hfd-web/.env` | ARIA2_HOST_DOWNLOADS | 仅 compose 插值用，可选 |
+
+`hfd-web/.env` 只需在下载目录不是默认的 `../downloads` 时才建：
+
+```bash
+cd <项目根>/hfd-web
+cp .env.example .env
+echo "ARIA2_HOST_DOWNLOADS=/volume3/video" > .env
+```
+
+> **为什么分两层**：compose 的 `${VAR}` 插值只读 shell 环境和 compose 同目录的 `.env`，
+> **不读 `env_file:`**。而 `env_file:` 的内容又需要和应用配置一致。分成两层各自语义清晰。
+>
+> `ARIA2_HOST_DOWNLOADS` 必须是 **aria2 容器挂载的同一个宿主路径**，
+> 否则两个容器看不到同一批文件。
+容器专属项在 `docker-compose.yml` 的 `environment:` 里覆盖。
+
+### 注意
+
+- `hfd-web` 必须以 root 跑（`user: "0:0"`），才能给下载目录放开权限
+- `ARIA2_RPC` 必须是 NAS 局域网 IP，容器里的 `127.0.0.1` 指向容器自己
+
+---
+
 ## 路径映射（最容易出错的地方）
 
 aria2 容器内的路径 ↔ 宿主机路径映射关系：
 
 ```
 容器内路径                              宿主机路径（取决于挂载）
-  /downloads/models/MiniMax-H3/vae/    /volume3/video/models/MiniMax-H3/vae/
+  /downloads/models/MiniMax-H3/vae/    <宿主下载根>/models/MiniMax-H3/vae/
 ```
+
+`<宿主下载根>` 由 compose 的 `ARIA2_HOST_DOWNLOADS` 决定（默认 `../downloads`，即项目下的 `downloads/`）。
 
 三件事必须对齐：
 
-1. **Docker 挂载**：`/volume3/video/models:/downloads`（挂父目录，让 aria2 自己建子目录）
+1. **Docker 挂载**：`${ARIA2_HOST_DOWNLOADS}:/downloads`（挂父目录，让 aria2 自己建子目录）
 2. **aria2 `--dir`**：可不设（脚本用绝对 dir 字段覆盖），或在 aria2.conf 设 `--dir=/downloads`
-3. **脚本 `--local-dir`**：`/volume3/video/models/MiniMax-H3`
+3. **脚本 `--local-dir`**：`/downloads/models/<repo>`（**容器内**路径）
 
-如果挂载是 `/volume3/video/models:/downloads`、脚本写绝对路径 `dir=/downloads/models/MiniMax-H3/vae`，最终落点：
+如果挂载是 `<宿主下载根>:/downloads`、脚本写绝对路径 `dir=/downloads/models/MiniMax-H3/vae`，最终落点：
 - 容器：`/downloads/models/MiniMax-H3/vae/xxx.safetensors`
-- 宿主：`/volume3/video/models/models/MiniMax-H3/vae/xxx.safetensors`
+- 宿主：`<宿主下载根>/models/MiniMax-H3/vae/xxx.safetensors`
 
-⚠️ 注意 `models/` 出现了两次！如果不想这样，去掉 `ARIA2_DIR_PREFIX` 里的 `models/`：
+⚠️ `models/` 出现两次是因为 `ARIA2_DIR_PREFIX` 默认带了 `models/`。想去掉就设：
 
 ```bash
 export ARIA2_DIR_PREFIX=/downloads
 ```
+
+⚠️ **aria2 容器和 hfd-web 容器必须挂同一个宿主路径**，否则两边看不到同一批文件。
 
 ---
 

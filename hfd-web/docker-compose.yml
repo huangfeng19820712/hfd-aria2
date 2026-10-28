@@ -4,17 +4,32 @@ services:
     image: hfd-web:latest
     container_name: hfd-web
     restart: unless-stopped
+    # Must run as root (or the same uid as the aria2 container) so it can relax
+    # permissions on the directories it creates; aria2 runs unprivileged and
+    # would fail with ERROR 16/18 on a root-owned 755 directory.
+    user: "0:0"
     ports:
       - "8080:8080"
     environment:
-      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
-      - HF_TOKEN=${HF_TOKEN:-}
-      - ARIA2_RPC=${ARIA2_RPC:-http://127.0.0.1:6800/jsonrpc}
-      - ARIA2_SECRET=${ARIA2_SECRET:-}
-      - ARIA2_DIR_PREFIX=${ARIA2_DIR_PREFIX:-/downloads/models}
-      - ARIA2_WEB_URL=${ARIA2_WEB_URL:-}
+      # Container-specific overrides. Everything else lives in the shared
+      # hfd-aria2.env mounted below.
+      - HFD_SCRIPT_DIR=/hfd-scripts
+      - LOG_DIR=/app/data/logs
+    env_file:
+      # Relative to this compose file's directory; keeps the project relocatable.
+      - ../hfd-aria2.env
     volumes:
-      - /volume2/M/ai/models/hfd-aria2.sh:/hfd-scripts/hfd-aria2.sh:ro
-      - /volume2/M/ai/models/hfd-aria2-rpc.sh:/hfd-scripts/hfd-aria2-rpc.sh:ro
-      - /volume3/video:/downloads
+      - ../hfd-aria2.sh:/hfd-scripts/hfd-aria2.sh:ro
+      - ../hfd-aria2-rpc.sh:/hfd-scripts/hfd-aria2-rpc.sh:ro
+      - ../hfd-aria2-lib.sh:/hfd-scripts/hfd-aria2-lib.sh:ro
+      - ../hfd-aria2.env:/hfd-scripts/hfd-aria2.env:ro
+      # Host download root -> container /downloads. Must resolve to the SAME
+      # host path the aria2 container mounts, otherwise the two containers see
+      # different files.
+      #
+      # Relative (default): ../downloads, i.e. <project>/downloads - keeps the
+      # project self-contained and relocatable.
+      # Absolute: set ARIA2_HOST_DOWNLOADS=/volume3/video in a .env file next
+      # to this compose file (or export it) to use an existing storage path.
+      - ${ARIA2_HOST_DOWNLOADS:-../downloads}:/downloads
       - ./data/logs:/app/data/logs

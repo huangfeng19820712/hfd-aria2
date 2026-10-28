@@ -51,6 +51,15 @@ EOF
 REPO_ID=$1
 shift
 
+if [[ "${BASH_SOURCE[0]}" = /* ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+    SCRIPT_DIR="$(cd "$(dirname "$(pwd)/${BASH_SOURCE[0]}")" && pwd)"
+fi
+
+[[ -f "$SCRIPT_DIR/hfd-aria2-lib.sh" ]] && source "$SCRIPT_DIR/hfd-aria2-lib.sh"
+[[ -f "$SCRIPT_DIR/hfd-aria2.env" ]] && load_env_file "$SCRIPT_DIR/hfd-aria2.env"
+
 # Default values
 TOOL="aria2c"
 THREADS=4
@@ -100,20 +109,20 @@ check_command() {
 check_command curl
 [[ "$TOOL" == "wget" ]] && check_command wget
 
-if [[ "${BASH_SOURCE[0]}" = /* ]]; then
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-else
-    SCRIPT_DIR="$(cd "$(dirname "$(pwd)/${BASH_SOURCE[0]}")" && pwd)"
-fi
-
-[[ -f "$SCRIPT_DIR/hfd-aria2.env" ]] && source "$SCRIPT_DIR/hfd-aria2.env"
-
 LOCAL_DIR="${LOCAL_DIR:-${REPO_ID#*/}}"
 mkdir -p "$LOCAL_DIR/.hfd"
 
 ARIA2_DIR_PREFIX="${ARIA2_DIR_PREFIX:-/downloads/models}"
 REPO_SHORT="${REPO_ID##*/}"
 REPO_DIR_NAME="${REPO_DIR_NAME:-$REPO_SHORT}"
+
+# The download dir may be created by a different uid than the one aria2 runs as
+# (e.g. this script runs as root inside a container, aria2 runs unprivileged).
+# aria2 then fails with ERROR 16/18 (cannot create the file / directory).
+# Relax permissions so any uid can write into the download tree.
+for D in "$LOCAL_DIR" "${ARIA2_DIR_PREFIX%/}/$REPO_DIR_NAME"; do
+    [[ -d "$D" ]] && chmod 777 "$D" 2>/dev/null
+done
 
 REPO_API_PATH="models/$REPO_ID"; DOWNLOAD_API_PATH="$REPO_ID"
 [[ "$DATASET" == 1 ]] && { REPO_API_PATH="datasets/$REPO_ID"; DOWNLOAD_API_PATH=$REPO_API_PATH; }
@@ -149,8 +158,8 @@ check_authentication() {
     else
         printf '%s' "$1" | grep -q '"gated":[^f]' && gated=true || gated=false
     fi
-    if [[ "$gated" != "false" && ( -z "$HF_TOKEN" || -z "$HF_USERNAME" ) ]]; then
-        printf "%bThe repository requires authentication, but --hf_username and --hf_token is not passed. Please get token from https://huggingface.co/settings/tokens.\nExiting.\n%b" "$RED" "$NC"
+    if [[ "$gated" != "false" && -z "$HF_TOKEN" ]]; then
+        printf "%bThe repository requires authentication, but no HF token was supplied. Please get one from https://huggingface.co/settings/tokens and set it in hfd-aria2.env.\nExiting.\n%b" "$RED" "$NC"
         exit 1
     fi
 }
@@ -291,7 +300,7 @@ build_download_list() {
             [[ -n "$REPO_DIR_NAME" ]] && DIR_PREFIX="${DIR_PREFIX:+$DIR_PREFIX/}$REPO_DIR_NAME"
             [[ -n "$dir" ]] && DIR_PREFIX="${DIR_PREFIX}/$dir"
             printf '%s/%s/resolve/%s/%s\n dir=%s\n out=%s\n' "$HF_ENDPOINT" "$DOWNLOAD_API_PATH" "$REVISION" "$path" "$DIR_PREFIX" "${path##*/}"
-            [[ "$TOOL" == "wget" && -n "$HF_TOKEN" ]] && printf ' header=Authorization: Bearer %s\n' "$HF_TOKEN"
+            [[ -n "$HF_TOKEN" ]] && printf ' header=Authorization: Bearer %s\n' "$HF_TOKEN"
             printf '\n'
         else
             cur=$(stat -c%s "$path" 2>/dev/null || echo 0); (( cur > size )) && rm -f "$path"

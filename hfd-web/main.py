@@ -12,10 +12,41 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import FileResponse, HTMLResponse
 
 APP_DIR = Path(__file__).parent
+
+
+def load_env_file(path: Path) -> None:
+    """Load KEY=VALUE pairs without overriding variables already in os.environ.
+
+    Mirrors load_env_file() in hfd-aria2-lib.sh so the shell scripts and the web
+    service share one config file. Existing environment wins, so docker-compose
+    `environment:` still takes precedence over the file.
+    """
+    if not path.is_file():
+        return
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if not key.isidentifier():
+            continue
+        os.environ.setdefault(key, value)
+
+
+SCRIPT_DIR = os.environ.get("HFD_SCRIPT_DIR", "/hfd-scripts")
+load_env_file(Path(SCRIPT_DIR) / "hfd-aria2.env")
+
 LOG_DIR = Path(os.environ.get("LOG_DIR", "/app/data/logs"))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-SCRIPT_DIR = os.environ.get("HFD_SCRIPT_DIR", "/hfd-scripts")
 ARIA2_DIR_PREFIX = os.environ.get("ARIA2_DIR_PREFIX", "/downloads/models").rstrip("/")
 ARIA2_RPC = os.environ.get("ARIA2_RPC", "http://127.0.0.1:6800/jsonrpc")
 ARIA2_SECRET = os.environ.get("ARIA2_SECRET", "")
