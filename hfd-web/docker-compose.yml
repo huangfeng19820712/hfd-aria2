@@ -1,0 +1,20 @@
+services:
+  hfd-web:
+    build: .
+    image: hfd-web:latest
+    container_name: hfd-web
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
+      - HF_TOKEN=${HF_TOKEN:-}
+      - ARIA2_RPC=${ARIA2_RPC:-http://127.0.0.1:6800/jsonrpc}
+      - ARIA2_SECRET=${ARIA2_SECRET:-}
+      - ARIA2_DIR_PREFIX=${ARIA2_DIR_PREFIX:-/downloads/models}
+      - ARIA2_WEB_URL=${ARIA2_WEB_URL:-}
+    volumes:
+      - /volume2/M/ai/models/hfd-aria2.sh:/hfd-scripts/hfd-aria2.sh:ro
+      - /volume2/M/ai/models/hfd-aria2-rpc.sh:/hfd-scripts/hfd-aria2-rpc.sh:ro
+      - /volume3/video:/downloads
+      - ./data/logs:/app/data/logs

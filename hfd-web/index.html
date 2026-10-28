@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>hfd-aria2 下载提交</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         max-width: 900px; margin: 30px auto; padding: 0 20px; color: #222; }
+  h2 { margin-top: 0; }
+  label { display: block; margin: 12px 0 4px; font-weight: 600; }
+  label .hint { font-weight: normal; color: #888; font-size: 13px; }
+  input[type=text], textarea { width: 100%; box-sizing: border-box; padding: 8px;
+                               font-family: ui-monospace, "SF Mono", Consolas, monospace;
+                               font-size: 14px; border: 1px solid #ccc; border-radius: 4px; }
+  textarea { min-height: 120px; resize: vertical; }
+  .row { display: flex; gap: 12px; }
+  .row > * { flex: 1; }
+  button { padding: 12px 24px; background: #4CAF50; color: white; border: none;
+           border-radius: 4px; cursor: pointer; font-size: 16px; font-weight: 600; }
+  button:hover { background: #45a049; }
+  button:disabled { background: #ccc; cursor: not-allowed; }
+  #preview { background: #fafafa; padding: 12px; border-radius: 4px; margin: 8px 0 0;
+             font-family: ui-monospace, "SF Mono", Consolas, monospace;
+             font-size: 13px; min-height: 30px; border: 1px solid #eee; }
+  .preview-line { margin: 2px 0; }
+  .ok { color: #2a7a2a; font-weight: 600; }
+  .bad { color: #c33; }
+  .repo-group { margin-left: 16px; color: #555; }
+  .empty { color: #999; font-style: italic; }
+  #ping { margin: 12px 0; padding: 10px 14px; border-radius: 4px; font-size: 14px; }
+  #ping.ok { background: #e8f5e9; border: 1px solid #a5d6a7; color: #2a7a2a; }
+  #ping.bad { background: #fdecea; border: 1px solid #f5c6cb; color: #c33; }
+</style>
+</head>
+<body>
+
+<h2>hfd-aria2 下载提交</h2>
+<p style="color:#666">粘贴 HF 页面 URL（支持 blob / resolve 形式），按仓库自动分组提交。</p>
+
+<div id="ping" class="empty">正在检测 aria2 RPC…</div>
+
+<form method="post" action="/submit">
+
+  <label>HF 页面 URL（每行一个）<span class="hint">— 形如 <code>https://huggingface.co/org/repo/blob/main/path/file.ext</code></span></label>
+  <textarea id="urls" name="urls_text" placeholder="https://huggingface.co/Comfy-Org/ltx-2/blob/main/split_files/loras/xxx.safetensors"></textarea>
+  <div id="preview" class="empty">解析预览：粘贴 URL 后自动显示...</div>
+
+  <label>手动 include patterns（每行一个 glob，可选）<span class="hint">— 会附加到第一个匹配到的仓库</span></label>
+  <textarea id="includes" name="includes_text" placeholder="*.safetensors&#10;vae/*"></textarea>
+
+  <label>本地保存根路径</label>
+  <input type="text" name="local_dir_root" value="{{LOCAL_DIR_ROOT}}" required>
+  <p class="hint" style="margin:4px 0 0;color:#888">最终每个 repo 落到 <code>{根路径}/org__repo/</code>，例如 <code>{{LOCAL_DIR_ROOT}}/Comfy-Org__ltx-2/</code></p>
+
+  <div class="row">
+    <div>
+      <label>线程 (-x)</label>
+      <input type="text" name="threads" value="4">
+    </div>
+    <div>
+      <label>并发 (-j)</label>
+      <input type="text" name="concurrent" value="4">
+    </div>
+  </div>
+
+  <p style="margin-top:20px">
+    <button type="submit" id="submit-btn">提交下载</button>
+  </p>
+
+</form>
+
+<script>
+const HF_URL_RE = /https?:\/\/huggingface\.co\/([^/\s]+)\/([^/\s]+)\/(?:blob|resolve)\/([^/\s]+)\/(.+)/;
+
+function parseLine(line) {
+  line = line.trim().split('?')[0];
+  if (!line) return null;
+  const m = HF_URL_RE.exec(line);
+  if (!m) return null;
+  return { repo: `${m[1]}/${m[2]}`, path: m[4] };
+}
+
+function updatePreview() {
+  const text = document.getElementById('urls').value;
+  const lines = text.split('\n');
+  const byRepo = {};
+  const bad = [];
+  for (const line of lines) {
+    const r = parseLine(line);
+    if (r) {
+      (byRepo[r.repo] = byRepo[r.repo] || []).push(r.path);
+    } else if (line.trim()) {
+      bad.push(line.trim());
+    }
+  }
+  const preview = document.getElementById('preview');
+  const repoCount = Object.keys(byRepo).length;
+  const fileCount = Object.values(byRepo).reduce((s, arr) => s + arr.length, 0);
+
+  if (repoCount === 0 && bad.length === 0) {
+    preview.className = 'empty';
+    preview.innerHTML = '解析预览：粘贴 URL 后自动显示...';
+    return;
+  }
+
+  let html = `<div class="preview-line ok">✓ 共 ${repoCount} 个仓库，${fileCount} 个文件${bad.length ? `，${bad.length} 行无法解析` : ''}</div>`;
+  for (const [repo, paths] of Object.entries(byRepo)) {
+    html += `<div class="repo-group"><b>${repo}</b>（${paths.length} 个）</div>`;
+    for (const p of paths) {
+      html += `<div class="repo-group">→ ${p}</div>`;
+    }
+  }
+  if (bad.length) {
+    html += `<div class="preview-line bad">✗ 无法解析：</div>`;
+    for (const b of bad) {
+      html += `<div class="repo-group bad">${b}</div>`;
+    }
+  }
+  preview.className = '';
+  preview.innerHTML = html;
+}
+
+document.getElementById('urls').addEventListener('input', updatePreview);
+
+async function pingAria2() {
+  const el = document.getElementById('ping');
+  try {
+    const res = await fetch('/api/ping', { cache: 'no-store' });
+    const data = await res.json();
+    if (data.ok) {
+      el.className = 'ok';
+      el.textContent = '✅ ' + data.message;
+    } else {
+      el.className = 'bad';
+      el.textContent = '❌ ' + data.message;
+    }
+  } catch (e) {
+    el.className = 'bad';
+    el.textContent = '❌ 无法检测 aria2：' + e;
+  }
+}
+pingAria2();
+
+document.querySelector('form').addEventListener('submit', function(e) {
+  const btn = document.getElementById('submit-btn');
+  btn.disabled = true;
+  btn.textContent = '提交中…';
+});
+
+window.addEventListener('pageshow', updatePreview);
+</script>
+
+</body>
+</html>

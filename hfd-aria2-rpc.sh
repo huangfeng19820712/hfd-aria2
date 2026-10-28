@@ -292,21 +292,29 @@ while IFS= read -r LINE || [[ -n "$LINE" ]]; do
         continue
     fi
 
-    if [[ "$LINE" == *"dir="* ]]; then
-        DIR="${LINE#*dir=}"
-        dbg "matched dir, DIR=$DIR"
-    elif [[ "$LINE" == *"out="* ]]; then
-        OUT="${LINE#*out=}"
-        dbg "matched out, OUT=$OUT"
-    elif [[ "$LINE" == *"header="* ]]; then
-        HEADERS+=("${LINE#*header=}")
-        dbg "matched header"
-    else
-        if [[ -z "$URL" ]]; then
-            URL="$LINE"
-            dbg "matched URL, URL=$URL"
-        fi
-    fi
+    case "$LINE" in
+        " dir="*|"dir="*)
+            DIR="${LINE#*dir=}"
+            dbg "matched dir, DIR=$DIR"
+            ;;
+
+        " out="*|"out="*)
+            OUT="${LINE#*out=}"
+            dbg "matched out, OUT=$OUT"
+            ;;
+
+        " header="*|"header="*)
+            HEADERS+=("${LINE#*header=}")
+            dbg "matched header"
+            ;;
+
+        *)
+            if [[ -z "$URL" ]]; then
+                URL="$LINE"
+                dbg "matched URL, URL=$URL"
+            fi
+            ;;
+    esac
 
 done < "$FILES_LIST"
 

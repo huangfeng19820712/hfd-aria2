@@ -113,6 +113,7 @@ mkdir -p "$LOCAL_DIR/.hfd"
 
 ARIA2_DIR_PREFIX="${ARIA2_DIR_PREFIX:-/downloads/models}"
 REPO_SHORT="${REPO_ID##*/}"
+REPO_DIR_NAME="${REPO_DIR_NAME:-$REPO_SHORT}"
 
 REPO_API_PATH="models/$REPO_ID"; DOWNLOAD_API_PATH="$REPO_ID"
 [[ "$DATASET" == 1 ]] && { REPO_API_PATH="datasets/$REPO_ID"; DOWNLOAD_API_PATH=$REPO_API_PATH; }
@@ -287,8 +288,9 @@ build_download_list() {
             [[ -e "$path" && ! -e "$path.aria2" ]] && rm -f "$path"
             dir="${path%/*}"; [[ "$dir" == "$path" ]] && dir=""
             DIR_PREFIX="${ARIA2_DIR_PREFIX}"
-            [[ -n "$REPO_SHORT" ]] && DIR_PREFIX="${DIR_PREFIX:+$DIR_PREFIX/}$REPO_SHORT"
-            printf '%s/%s/resolve/%s/%s\n dir=%s/%s\n out=%s\n' "$HF_ENDPOINT" "$DOWNLOAD_API_PATH" "$REVISION" "$path" "$DIR_PREFIX" "$dir" "${path##*/}"
+            [[ -n "$REPO_DIR_NAME" ]] && DIR_PREFIX="${DIR_PREFIX:+$DIR_PREFIX/}$REPO_DIR_NAME"
+            [[ -n "$dir" ]] && DIR_PREFIX="${DIR_PREFIX}/$dir"
+            printf '%s/%s/resolve/%s/%s\n dir=%s\n out=%s\n' "$HF_ENDPOINT" "$DOWNLOAD_API_PATH" "$REVISION" "$path" "$DIR_PREFIX" "${path##*/}"
             [[ "$TOOL" == "wget" && -n "$HF_TOKEN" ]] && printf ' header=Authorization: Bearer %s\n' "$HF_TOKEN"
             printf '\n'
         else
