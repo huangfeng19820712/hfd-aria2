@@ -67,6 +67,7 @@ CONCURRENT=5
 HF_ENDPOINT=${HF_ENDPOINT:-"https://huggingface.co"}
 INCLUDE_PATTERNS=()
 EXCLUDE_PATTERNS=()
+FILE_LIST=""
 REVISION="main"
 
 validate_number() {
@@ -78,6 +79,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --include) shift; while [[ $# -gt 0 && ! ($1 =~ ^--) && ! ($1 =~ ^-[^-]) ]]; do INCLUDE_PATTERNS+=("$1"); shift; done ;;
         --exclude) shift; while [[ $# -gt 0 && ! ($1 =~ ^--) && ! ($1 =~ ^-[^-]) ]]; do EXCLUDE_PATTERNS+=("$1"); shift; done ;;
+        --file-list) FILE_LIST="$2"; shift 2 ;;
         --hf_username) HF_USERNAME="$2"; shift 2 ;;
         --hf_token) HF_TOKEN="$2"; shift 2 ;;
         --tool)
@@ -94,9 +96,11 @@ done
 
 # A fingerprint of the options that affect the file list; a change forces regeneration.
 generate_command_string() {
-    printf 'REPO_ID=%s TOOL=%s INCLUDE=%s EXCLUDE=%s DATASET=%s HF_USERNAME=%s HF_TOKEN=%s HF_ENDPOINT=%s REVISION=%s' \
+    local fl_hash=""
+    [[ -n "$FILE_LIST" && -f "$FILE_LIST" ]] && fl_hash="$(wc -l < "$FILE_LIST" 2>/dev/null)$(cksum "$FILE_LIST" 2>/dev/null)"
+    printf 'REPO_ID=%s TOOL=%s INCLUDE=%s EXCLUDE=%s DATASET=%s HF_USERNAME=%s HF_TOKEN=%s HF_ENDPOINT=%s REVISION=%s FILELIST=%s' \
         "$REPO_ID" "$TOOL" "${INCLUDE_PATTERNS[*]}" "${EXCLUDE_PATTERNS[*]}" "${DATASET:-0}" \
-        "${HF_USERNAME:-}" "${HF_TOKEN:-}" "${HF_ENDPOINT:-}" "$REVISION"
+        "${HF_USERNAME:-}" "${HF_TOKEN:-}" "${HF_ENDPOINT:-}" "$REVISION" "$fl_hash"
 }
 
 check_command() {
@@ -195,9 +199,27 @@ should_regenerate_filelist() {
 fileslist_file=".hfd/${TOOL}_urls.txt"
 
 # Convert a list of wildcard patterns into a single alternation regex.
+# Every regex metacharacter is escaped so literal file names (which may contain
+# "(" ")" "+" "[" ...) match literally; only "*" keeps its wildcard meaning.
 patterns_to_regex() {
     (($#)) || return 0
-    printf '%s\n' "$@" | sed 's/\./\\./g; s/\*/.*/g' | paste -sd '|' -
+    local p out=""
+    for p in "$@"; do
+        p="${p//\\/\\\\}"
+        p="${p//./\\.}"
+        p="${p//+/\\+}"
+        p="${p//(/\\(}"
+        p="${p//)/\\)}"
+        p="${p//[/\\[}"
+        p="${p//]/\\]}"
+        p="${p//\?/\\?}"
+        p="${p//|/\\|}"
+        p="${p//^/\\^}"
+        p="${p//\$/\\$}"
+        p="${p//\*/.*}"
+        out="${out:+$out|}$p"
+    done
+    printf '%s' "$out"
 }
 
 # Emit "size<TAB>path" for every file in a tree page (jq, or a grep/awk fallback).
@@ -228,6 +250,8 @@ siblings_complete() {
 }
 
 # Keep only "size<TAB>path" stdin lines matching include/exclude (the *_REGEX globals).
+# When FILE_LIST is set, membership is decided by exact path match against that
+# list instead of the include regex; exclude still applies on top.
 filter_size_path() {
     local size path
     while IFS=$'\t' read -r size path; do
@@ -320,6 +344,17 @@ if should_regenerate_filelist; then
     [[ "$REPO_SIZE" =~ ^[0-9]+$ ]] && printf "%bRepository size: %s%b\n" "$DIM" "$(human "$REPO_SIZE")" "$NC"
     INCLUDE_REGEX=$(patterns_to_regex "${INCLUDE_PATTERNS[@]}")
     EXCLUDE_REGEX=$(patterns_to_regex "${EXCLUDE_PATTERNS[@]}")
+    # A file list names exact paths; match them literally (anchored) so a file
+    # called "config.json" never pulls in "onnx/config.json".
+    if [[ -n "$FILE_LIST" && -f "$FILE_LIST" ]]; then
+        local -a flist=()
+        local fl
+        while IFS= read -r fl || [[ -n "$fl" ]]; do
+            [[ -n "$fl" ]] && flist+=("$fl")
+        done < "$FILE_LIST"
+        INCLUDE_REGEX=$(patterns_to_regex "${flist[@]}")
+        INCLUDE_REGEX="^(${INCLUDE_REGEX})$"
+    fi
     printf "%bListing files...%b" "$DIM" "$NC"
     # Fast path: typical repos return their whole file list in the metadata; only big repos
     # (truncated siblings) need the paginated, resumable tree walk.

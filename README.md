@@ -238,17 +238,28 @@ docker compose logs -f hfd-web
 
 ### 用法
 
-1. 粘贴 HF 页面 URL（每行一个，支持 `blob` 和 `resolve` 两种形式）
-2. 前端实时显示解析结果（按仓库分组、文件数）
+1. 粘贴 HF 页面 URL（每行一个）
+2. 前端实时显示解析结果，并调 HF API 列出仓库文件供预览
 3. 提交 → 后端调 `hfd-aria2.sh` → 跳 AriaNg
+
+**支持三种 URL 形式：**
+
+| URL 形式 | 例子 | 含义 |
+|---|---|---|
+| 文件 | `.../org/repo/blob/main/path/file.safetensors` | 只下这个文件 |
+| 目录 | `.../org/repo/tree/main/onnx` | 下 `onnx/` 目录下的文件 |
+| 仓库 | `.../org/repo` | 下整个仓库 |
 
 ```bash
 # 例：粘贴这些
-https://huggingface.co/Comfy-Org/ltx-2/blob/main/split_files/loras/xxx.safetensors
-https://huggingface.co/Lightricks/LTX-2.3/blob/main/ltx-2.3-spatial-upscaler-x2-1.1.safetensors
+https://huggingface.co/BAAI/bge-m3                                        # 整个仓库
+https://huggingface.co/BAAI/bge-m3/tree/main/onnx                          # 只有 onnx/ 目录
+https://huggingface.co/Comfy-Org/ltx-2/blob/main/split_files/loras/x.safetensors
 ```
 
-会拆成 2 个仓库、分别调用 `hfd-aria2.sh`，每个仓库落到 `{ARIA2_DIR_PREFIX}/org__repo/`。
+会按仓库分组、分别调用 `hfd-aria2.sh`，每个仓库落到 `{ARIA2_DIR_PREFIX}/org__repo/`。
+
+**默认排除无用文件**：预览区会列出被排除的文件（文档配图 `.jpg/.png/.webp`、`.DS_Store`、`.gitattributes` 等），避免下几十 MB 的示意图。显式点名的文件不受此规则影响。
 
 ### 配置（两层，各管各的）
 
@@ -475,6 +486,7 @@ grep -n 'check_command' hfd-aria2.sh
 选项:
   --include PATTERN [PATTERN...]  包含的文件路径 pattern（glob）
   --exclude PATTERN [PATTERN...]  排除的文件路径 pattern（glob）
+  --file-list FILE                 从文件读取精确路径列表（每行一个），用于下载大量指定文件
   --hf_username NAME              HF 用户名（gated 仓库需要）
   --hf_token TOKEN                HF token（命令行传入，覆盖 env）
   --tool aria2c|wget              下载工具（默认 aria2c，RPC 模式自动用 aria2c）

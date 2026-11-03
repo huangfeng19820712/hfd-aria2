@@ -41,9 +41,10 @@
 
 <form method="post" action="/submit">
 
-  <label>HF 页面 URL（每行一个）<span class="hint">— 形如 <code>https://huggingface.co/org/repo/blob/main/path/file.ext</code></span></label>
-  <textarea id="urls" name="urls_text" placeholder="https://huggingface.co/Comfy-Org/ltx-2/blob/main/split_files/loras/xxx.safetensors"></textarea>
+  <label>HF 页面 URL（每行一个）<span class="hint">— 支持文件 /blob/、目录 /tree/、仓库首页三种形式；仓库首页=下载全部文件</span></label>
+  <textarea id="urls" name="urls_text" placeholder="https://huggingface.co/BAAI/bge-m3&#10;https://huggingface.co/org/repo/blob/main/path/file.safetensors"></textarea>
   <div id="preview" class="empty">解析预览：粘贴 URL 后自动显示...</div>
+
 
   <label>手动 include patterns（每行一个 glob，可选）<span class="hint">— 会附加到第一个匹配到的仓库</span></label>
   <textarea id="includes" name="includes_text" placeholder="*.safetensors&#10;vae/*"></textarea>
@@ -70,17 +71,36 @@
 </form>
 
 <script>
-const HF_URL_RE = /https?:\/\/huggingface\.co\/([^/\s]+)\/([^/\s]+)\/(?:blob|resolve)\/([^/\s]+)\/(.+)/;
+const HF_HOST = '(?:huggingface\\.co|hf-mirror\\.com)';
+const HF_FILE_RE = new RegExp(`^https?://${HF_HOST}/([^/\\s]+)/([^/\\s]+)/(?:blob|resolve)/([^/\\s]+)/(.+)$`);
+const HF_TREE_RE = new RegExp(`^https?://${HF_HOST}/([^/\\s]+)/([^/\\s]+)/tree/([^/\\s]+)(?:/(.*))?$`);
+const HF_REPO_RE = new RegExp(`^https?://${HF_HOST}/([^/\\s]+)/([^/\\s]+)$`);
 
 function parseLine(line) {
-  line = line.trim().split('?')[0];
+  line = line.trim().split('?')[0].replace(/\/+$/, '');
   if (!line) return null;
-  const m = HF_URL_RE.exec(line);
-  if (!m) return null;
-  return { repo: `${m[1]}/${m[2]}`, path: m[4] };
+  let m = HF_FILE_RE.exec(line);
+  if (m) return { repo: `${m[1]}/${m[2]}`, kind: 'file', path: m[4], prefix: '' };
+  m = HF_TREE_RE.exec(line);
+  if (m) return { repo: `${m[1]}/${m[2]}`, kind: 'dir', path: '', prefix: m[4] || '' };
+  m = HF_REPO_RE.exec(line);
+  if (m) return { repo: `${m[1]}/${m[2]}`, kind: 'dir', path: '', prefix: '' };
+  return null;
 }
 
-function updatePreview() {
+function fmtSize(n) {
+  if (!n) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(i ? 2 : 0)} ${u[i]}`;
+}
+
+// state: repo -> {prefixes:Set, files:Set, listing:null, excluded:Set}
+const state = {};
+let listToken = 0;
+
+function collect() {
   const text = document.getElementById('urls').value;
   const lines = text.split('\n');
   const byRepo = {};
@@ -88,14 +108,58 @@ function updatePreview() {
   for (const line of lines) {
     const r = parseLine(line);
     if (r) {
-      (byRepo[r.repo] = byRepo[r.repo] || []).push(r.path);
+      const e = (byRepo[r.repo] = byRepo[r.repo] || { prefixes: new Set(), files: new Set() });
+      if (r.kind === 'file') e.files.add(r.path);
+      else e.prefixes.add(r.prefix);
     } else if (line.trim()) {
       bad.push(line.trim());
     }
   }
+  return { byRepo, bad };
+}
+
+async function loadListing(repo, prefixes, files) {
+  const res = await fetch(`/api/files?repo=${encodeURIComponent(repo)}`, { cache: 'no-store' });
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.error || '获取文件列表失败');
+  const keep = new Set();
+  const excluded = new Set();
+  for (const f of data.files) {
+    const inScope = [...prefixes].some(p => f.path.startsWith(p));
+    if (inScope) {
+      if (f.excluded) excluded.add(f.path);
+      else keep.add(f.path);
+    } else if (files.has(f.path)) {
+      keep.add(f.path);
+    }
+  }
+  return { keep, excluded, total: data.files.length, keptSize: data.kept_size, count: data.kept_count };
+}
+
+function renderSelection(repo, sel) {
+  if (!sel) return `<div class="repo-group">正在获取文件列表…</div>`;
+  const parts = [];
+  parts.push(`<div class="repo-group">共 ${sel.count} 个文件（已排除图片等 ${sel.excluded.size} 个），${fmtSize(sel.keptSize)}</div>`);
+  const keepList = [...sel.keep];
+  const show = keepList.slice(0, 200);
+  for (const p of show) {
+    parts.push(`<div class="repo-group">→ ${p}</div>`);
+  }
+  if (keepList.length > show.length) {
+    parts.push(`<div class="repo-group">… 还有 ${keepList.length - show.length} 个</div>`);
+  }
+  if (sel.excluded.size) {
+    const ex = [...sel.excluded].slice(0, 20);
+    parts.push(`<div class="repo-group bad">已排除：${ex.join(', ')}${sel.excluded.size > ex.length ? ' …' : ''}</div>`);
+  }
+  return parts.join('');
+}
+
+async function updatePreview() {
+  const token = ++listToken;
+  const { byRepo, bad } = collect();
   const preview = document.getElementById('preview');
   const repoCount = Object.keys(byRepo).length;
-  const fileCount = Object.values(byRepo).reduce((s, arr) => s + arr.length, 0);
 
   if (repoCount === 0 && bad.length === 0) {
     preview.className = 'empty';
@@ -103,12 +167,10 @@ function updatePreview() {
     return;
   }
 
-  let html = `<div class="preview-line ok">✓ 共 ${repoCount} 个仓库，${fileCount} 个文件${bad.length ? `，${bad.length} 行无法解析` : ''}</div>`;
-  for (const [repo, paths] of Object.entries(byRepo)) {
-    html += `<div class="repo-group"><b>${repo}</b>（${paths.length} 个）</div>`;
-    for (const p of paths) {
-      html += `<div class="repo-group">→ ${p}</div>`;
-    }
+  let html = `<div class="preview-line ok">✓ 共 ${repoCount} 个仓库${bad.length ? `，${bad.length} 行无法解析` : ''}</div>`;
+  for (const [repo, e] of Object.entries(byRepo)) {
+    html += `<div class="repo-group"><b>${repo}</b></div>`;
+    html += `<div id="sel-${repo.replace(/[^\w]/g, '_')}"></div>`;
   }
   if (bad.length) {
     html += `<div class="preview-line bad">✗ 无法解析：</div>`;
@@ -118,6 +180,19 @@ function updatePreview() {
   }
   preview.className = '';
   preview.innerHTML = html;
+
+  for (const [repo, e] of Object.entries(byRepo)) {
+    const el = document.getElementById('sel-' + repo.replace(/[^\w]/g, '_'));
+    if (!el) continue;
+    try {
+      const sel = await loadListing(repo, e.prefixes, e.files);
+      if (token !== listToken) return;
+      el.innerHTML = renderSelection(repo, sel);
+    } catch (err) {
+      if (token !== listToken) return;
+      el.innerHTML = `<div class="repo-group bad">获取文件列表失败: ${err.message}</div>`;
+    }
+  }
 }
 
 document.getElementById('urls').addEventListener('input', updatePreview);
